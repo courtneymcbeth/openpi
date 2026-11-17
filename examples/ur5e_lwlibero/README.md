@@ -1,0 +1,106 @@
+# pi0.5 LoRA fine-tuning for a UR5e on LW-BenchHub LIBERO tasks
+
+Fine-tunes the pi0.5 base model with LoRA for a single-arm UR5e with a Robotiq 2F-85 gripper on the
+LIBERO tasks as implemented in [LW-BenchHub](https://github.com/LightwheelAI/LW-BenchHub) (Isaac Lab).
+The configs are sized for one 24 GB GPU.
+
+## Train
+
+```bash
+git clone -b ur5e-lwlibero <this fork> openpi && cd openpi
+GIT_LFS_SKIP_SMUDGE=1 uv sync
+GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+
+# The dataset is a private Hugging Face dataset; log in once so it can be downloaded.
+uv run huggingface-cli login
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_ur5e_lwlibero_lora \
+    --exp-name=ur5e_run1 --overwrite
+```
+
+The first run downloads the dataset (to `$HF_LEROBOT_HOME`, default `~/.cache/huggingface/lerobot`) and
+the pi0.5 base weights (about 12 GB, to `$OPENPI_DATA_HOME`, default `~/.cache/openpi`). Point both at a
+scratch file system if your home directory is small. Checkpoints go to
+`checkpoints/pi05_ur5e_lwlibero_lora/<exp-name>/` every 1,000 steps. Use `--resume` instead of
+`--overwrite` to continue a run. Training logs to Weights & Biases; add `--no-wandb-enabled` to turn that
+off.
+
+Normalization statistics for the dataset are checked in (`assets/ur5e_lwlibero/norm_stats.json`), so
+there is no separate `compute_norm_stats` step. To recompute them after changing the dataset:
+
+```bash
+uv run scripts/compute_norm_stats.py --config-name pi05_ur5e_lwlibero_lora
+cp assets/pi05_ur5e_lwlibero_lora/<repo_id>/norm_stats.json examples/ur5e_lwlibero/assets/ur5e_lwlibero/
+```
+
+### Configs
+
+| Config | What it is |
+| --- | --- |
+| `pi05_ur5e_lwlibero_lora` | Recommended. LoRA on PaliGemma and the action expert, batch size 16, 60k steps. |
+| `pi05_ur5e_lwlibero_lora_frozen_vision` | Same, with the image encoder frozen as well. Use if the first runs out of memory. |
+| `pi05_ur5e_lwlibero_lora_prestats` | Same as the first, but normalizes with the UR5e statistics of the pi0.5 base model instead of this dataset's. For comparison. |
+| `pi05_ur5e_lwlibero_debug` | Tiny dummy model on the real dataset. Checks the data pipeline in a minute, on any machine. |
+
+If training runs out of GPU memory, in this order: `--batch-size 8`, then
+`pi05_ur5e_lwlibero_lora_frozen_vision`. The memory use of pi0.5 LoRA on 24 GB has not been measured
+here: the dataset machine has a 16 GB GPU.
+
+Model settings worth knowing: 20-step action chunks (one second at 20 Hz), joint targets predicted
+relative to the current joint angles, and the joint state fed to the model as discrete tokens in the
+prompt (the pi0.5 default, and the only way pi0.5 sees the state).
+
+## Dataset
+
+`<repo_id>` in LeRobot v2.1 format, 20 Hz.
+
+| Key | Shape | Meaning |
+| --- | --- | --- |
+| `image` | 224x224x3 | Third-person camera in front of the workspace, fixed to the robot base |
+| `wrist_image` | 224x224x3 | Camera on the gripper |
+| `joints` | 6 | Arm joint angles in radians (shoulder pan, shoulder lift, elbow, wrist 1-3) |
+| `gripper` | 1 | Gripper closure, 0 = open, 1 = closed |
+| `actions` | 7 | Absolute joint position targets, then the gripper command (0 = open, 1 = closed) |
+| `eef_pose` | 7 | Grasp point pose in the robot base frame, `[x y z qw qx qy qz]`. Not used by these configs. |
+
+These are the conventions of the `ur5e` embodiment in the pi0 and pi0.5 base models (see
+`docs/norm_stats.md`).
+
+### Where the data comes from
+
+LW-BenchHub has no UR5e and no single-arm demonstrations of its LIBERO tasks. The episodes here are
+LightWheel's published bimanual Double-Piper demonstrations
+(`LightwheelAI/lightwheel_tasks`, `lightwheel_libero_tasks_piper`) replayed by a UR5e that was added to
+LW-BenchHub:
+
+1. For each demonstration, the path of the Piper gripper that does the work is extracted and re-timed.
+   Demonstrations that use both arms one after the other are replayed in sequence by the single arm.
+2. UR5e joint angles are solved along the path, with the UR5e's fingertips following the Piper's.
+3. The scene is rebuilt with the same objects in the same places, the UR5e executes the joint path, and
+   the episode is kept only if the task's own success check passes and no other object was knocked away.
+
+So every episode in the dataset solved its task in simulation, and the actions are exactly the commands
+the simulator executed. The code is in the `ur5e` branch of the LW-BenchHub fork, under
+`lw_benchhub/scripts/retarget/` and `lw_benchhub/core/robots/universal_robots/`.
+
+### Rebuild the dataset
+
+On a machine with the LW-BenchHub fork set up and the raw episodes from its
+`retarget_piper_to_ur5e.py`:
+
+```bash
+export HF_LEROBOT_HOME=/path/with/space/lerobot
+uv run examples/ur5e_lwlibero/convert_lw_hdf5_to_lerobot.py --raw-dir /path/to/ur5e_raw
+uv run examples/ur5e_lwlibero/visualize_dataset.py --out-dir /path/to/viz
+```
+
+`visualize_dataset.py` writes `report.html` (coverage per task, episode lengths, state and action
+distributions, example trajectories, camera frames for every task) and sample videos.
+
+## Not covered here
+
+Evaluating a trained checkpoint. LW-BenchHub has an openpi policy wrapper (`policy/PI/`), but it runs a
+whole action chunk at one action per simulator step and has no config for this robot. Evaluation needs
+the `UR5e-Joint` robot from the fork, the simulator stepping at 20 Hz (5 physics steps per action), and
+observations mapped as `base_rgb` / `wrist_rgb` / `joints` / `gripper` (see
+`src/openpi/policies/ur5e_policy.py`).
