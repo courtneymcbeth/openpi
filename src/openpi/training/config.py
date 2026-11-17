@@ -20,7 +20,9 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.ur5e_policy as ur5e_policy
 import openpi.shared.download as _download
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.polaris_config as polaris_config
@@ -356,6 +358,57 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotUR5eDataConfig(DataConfigFactory):
+    """Data config for a single-arm UR5e with a Robotiq 2F-85 gripper (see `ur5e_policy.py`).
+
+    Expects a LeRobot dataset with the keys `image`, `wrist_image`, `joints` (6), `gripper` (1) and
+    `actions` (7: absolute joint position targets followed by the gripper command).
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Only applied to data coming from the dataset: rename the dataset keys to the keys the
+        # inference environment sends to the policy.
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "base_rgb": "image",
+                        "wrist_rgb": "wrist_image",
+                        "joints": "joints",
+                        "gripper": "gripper",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[ur5e_policy.UR5eInputs(model_type=model_config.model_type)],
+            outputs=[ur5e_policy.UR5eOutputs()],
+        )
+
+        # The dataset stores absolute joint position targets. The base models were trained on actions
+        # relative to the state at the start of each chunk, so convert the 6 joint dimensions to deltas
+        # and leave the gripper dimension absolute.
+        delta_action_mask = _transforms.make_bool_mask(6, -1)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
     """
     Config for training on DROID, using RLDS data format (for efficient training on larger datasets).
@@ -554,6 +607,90 @@ class TrainConfig:
     def __post_init__(self) -> None:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
+
+
+#
+# UR5e on the LW-BenchHub LIBERO tasks (see examples/ur5e_lwlibero/README.md).
+#
+# LeRobot dataset with the retargeted UR5e demonstrations, recorded at 20 Hz.
+UR5E_LWLIBERO_REPO_ID = "courtneymcbeth/ur5e_lwlibero"
+# Norm stats computed on that dataset are checked into the repo so that a fresh clone can train directly.
+_UR5E_LWLIBERO_ASSETS_DIR = str(pathlib.Path(__file__).resolve().parents[3] / "examples" / "ur5e_lwlibero" / "assets")
+_UR5E_LWLIBERO_ASSET_ID = "ur5e_lwlibero"
+
+
+def _ur5e_lwlibero_configs() -> list["TrainConfig"]:
+    def model(**kwargs) -> pi0_config.Pi0Config:
+        return pi0_config.Pi0Config(
+            pi05=True,
+            # 20 actions at 20 Hz: each chunk covers one second.
+            action_horizon=20,
+            # The prompts are short ("Task: ..., State: <7 numbers>;\nAction: "), so the default of 200 tokens
+            # only adds padding. `discrete_state_input` is left at the pi0.5 default (True): it is the only
+            # way pi0.5 sees the joint state, which joint-space actions need.
+            max_token_len=96,
+            **kwargs,
+        )
+
+    def data(assets: AssetsConfig) -> LeRobotUR5eDataConfig:
+        return LeRobotUR5eDataConfig(
+            repo_id=UR5E_LWLIBERO_REPO_ID,
+            assets=assets,
+            base_config=DataConfig(prompt_from_task=True),
+        )
+
+    own_stats = AssetsConfig(assets_dir=_UR5E_LWLIBERO_ASSETS_DIR, asset_id=_UR5E_LWLIBERO_ASSET_ID)
+    lora_model = model(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora")
+    lora_kwargs = {
+        "model": lora_model,
+        "weight_loader": weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        # Sized for a single 24 GB GPU. If this runs out of memory, use `--batch-size 8` or the
+        # `_frozen_vision` variant below.
+        "batch_size": 16,
+        "num_train_steps": 60_000,
+        "lr_schedule": _optimizer.CosineDecaySchedule(
+            warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=60_000, decay_lr=2.5e-6
+        ),
+        "optimizer": _optimizer.AdamW(clip_gradient_norm=1.0),
+        # Turn off EMA for LoRA finetuning.
+        "ema_decay": None,
+    }
+    return [
+        # Recommended: LoRA on both PaliGemma and the action expert, norm stats computed on our dataset.
+        TrainConfig(
+            name="pi05_ur5e_lwlibero_lora",
+            data=data(own_stats),
+            freeze_filter=lora_model.get_freeze_filter(),
+            **lora_kwargs,
+        ),
+        # Same, but reusing the UR5e norm stats the pi0.5 base model was pretrained with (for comparison).
+        TrainConfig(
+            name="pi05_ur5e_lwlibero_lora_prestats",
+            data=data(AssetsConfig(assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets", asset_id="ur5e")),
+            freeze_filter=lora_model.get_freeze_filter(),
+            **lora_kwargs,
+        ),
+        # Lower-memory fallback: additionally freezes the SigLIP image encoder, which the default LoRA
+        # freeze filter leaves trainable.
+        TrainConfig(
+            name="pi05_ur5e_lwlibero_lora_frozen_vision",
+            data=data(own_stats),
+            freeze_filter=nnx.Any(lora_model.get_freeze_filter(), nnx_utils.PathRegex("PaliGemma/img/.*")),
+            **lora_kwargs,
+        ),
+        # Tiny dummy model on the real dataset: checks the data pipeline end to end without a large GPU.
+        TrainConfig(
+            name="pi05_ur5e_lwlibero_debug",
+            model=model(paligemma_variant="dummy", action_expert_variant="dummy"),
+            data=data(own_stats),
+            batch_size=2,
+            num_train_steps=10,
+            save_interval=100,
+            overwrite=True,
+            exp_name="debug",
+            wandb_enabled=False,
+        ),
+    ]
 
 
 # Use `get_config` if you need to get a config by name in your code.
@@ -965,6 +1102,8 @@ _CONFIGS = [
         exp_name="debug_pi05",
         wandb_enabled=False,
     ),
+    # UR5e on the LW-BenchHub LIBERO tasks.
+    *_ur5e_lwlibero_configs(),
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
