@@ -17,6 +17,7 @@ The dataset is written to `$HF_LEROBOT_HOME/<repo_id>`. Features:
 `actions[t]` is the command applied after observing frame t.
 """
 
+import json
 import pathlib
 import shutil
 
@@ -74,6 +75,9 @@ def main(
     if not task_dirs:
         raise FileNotFoundError(f"No task directories found in {raw_dir}")
     num_episodes, num_frames = 0, 0
+    # Which source demonstration every episode comes from; LW-BenchHub's `replay_ur5e_dataset.py` uses this
+    # to restore the scene an episode started from.
+    sources, task_of_lang = [], {}
     for task_dir in task_dirs:
         files = sorted(task_dir.glob("*.hdf5"))[:max_episodes_per_task]
         for file in tqdm.tqdm(files, desc=task_dir.name[:50]):
@@ -81,6 +85,20 @@ def main(
                 if abs(float(f.attrs["fps"]) - FPS) > 1e-6:
                     raise ValueError(f"{file} was recorded at {f.attrs['fps']} Hz, expected {FPS} Hz")
                 lang = str(f.attrs["lang"])
+                if task_of_lang.setdefault(lang, task_dir.name) != task_dir.name:
+                    raise ValueError(
+                        f"Tasks {task_of_lang[lang]} and {task_dir.name} have the same instruction: {lang!r}"
+                    )
+                sources.append(
+                    {
+                        "episode_index": num_episodes,
+                        "task": task_dir.name,
+                        "raw_file": file.name,
+                        "source_file": str(f.attrs["source_file"]),
+                        "source_episode": str(f.attrs["source_episode"]),
+                        "robot_root_pose": [float(v) for v in f.attrs["robot_root_pose"]],
+                    }
+                )
                 image, wrist = f["obs/agentview_rgb"][:], f["obs/wrist_rgb"][:]
                 joints, gripper = f["obs/arm_joint_pos"][:], f["obs/gripper_closure"][:]
                 eef_pose, actions = f["obs/eef_pose_b"][:], f["actions"][:]
@@ -99,6 +117,8 @@ def main(
             dataset.save_episode()
             num_episodes += 1
             num_frames += len(actions)
+    with open(output_path / "meta" / "ur5e_source_episodes.jsonl", "w") as f:
+        f.writelines(json.dumps(entry) + "\n" for entry in sources)
     print(f"Wrote {num_episodes} episodes ({num_frames} frames) from {len(task_dirs)} tasks to {output_path}")
 
     if push_to_hub:
