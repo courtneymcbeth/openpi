@@ -20,6 +20,7 @@ The dataset is written to `$HF_LEROBOT_HOME/<repo_id>`. Features:
 import json
 import pathlib
 import shutil
+from typing import Literal
 
 import h5py
 from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
@@ -40,6 +41,7 @@ def main(
     repo_id: str = UR5E_LWLIBERO_REPO_ID,
     tasks: tuple[str, ...] = (),
     max_episodes_per_task: int | None = None,
+    image_storage: Literal["video", "image"] = "video",
     push_to_hub: bool = False,
 ):
     """Converts all episodes below `raw_dir`.
@@ -49,6 +51,8 @@ def main(
         repo_id: Name of the dataset below `$HF_LEROBOT_HOME` (and on the Hugging Face Hub).
         tasks: Only convert these tasks (default: all).
         max_episodes_per_task: Only convert the first N episodes of each task.
+        image_storage: "video" stores each camera of each episode as an AV1 video (about 2 KB per frame);
+            "image" stores lossless PNG frames (about 50 KB per frame, roughly 90 GB for the full dataset).
         push_to_hub: Upload the dataset to the Hugging Face Hub as a private dataset when done.
     """
     output_path = HF_LEROBOT_HOME / repo_id
@@ -60,8 +64,8 @@ def main(
         robot_type="ur5e",
         fps=FPS,
         features={
-            "image": {"dtype": "image", "shape": IMAGE_SHAPE, "names": ["height", "width", "channel"]},
-            "wrist_image": {"dtype": "image", "shape": IMAGE_SHAPE, "names": ["height", "width", "channel"]},
+            "image": {"dtype": image_storage, "shape": IMAGE_SHAPE, "names": ["height", "width", "channel"]},
+            "wrist_image": {"dtype": image_storage, "shape": IMAGE_SHAPE, "names": ["height", "width", "channel"]},
             "joints": {"dtype": "float32", "shape": (6,), "names": ["joints"]},
             "gripper": {"dtype": "float32", "shape": (1,), "names": ["gripper"]},
             "actions": {"dtype": "float32", "shape": (7,), "names": ["actions"]},

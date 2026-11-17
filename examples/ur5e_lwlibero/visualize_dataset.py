@@ -230,27 +230,40 @@ def chart_episode_trace(joints: np.ndarray, gripper: np.ndarray, actions: np.nda
     return fig
 
 
-def frame_strip(table, n: int) -> np.ndarray:
+def read_frames(root: pathlib.Path, info: dict, files: dict, episode: int, key: str) -> np.ndarray:
+    """All frames (T, H, W, 3) of one camera of one episode, for image- and video-based datasets."""
+    if info["features"][key]["dtype"] == "video":
+        import av
+
+        path = root / info["video_path"].format(
+            episode_chunk=episode // info["chunks_size"], video_key=key, episode_index=episode
+        )
+        with av.open(str(path)) as container:
+            return np.stack([frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)])
+    cells = pq.read_table(files[episode], columns=[key]).column(key).to_pylist()
+    return np.stack([decode_image(c) for c in cells])
+
+
+def frame_strip(image: np.ndarray, wrist: np.ndarray, n: int) -> np.ndarray:
     """Third-person frames on top, wrist frames below, `n` evenly spaced moments of one episode."""
-    idx = np.linspace(0, table.num_rows - 1, n).round().astype(int)
-    rows = []
-    for col in ("image", "wrist_image"):
-        cells = table.column(col).take(idx).to_pylist()
-        rows.append(np.concatenate([decode_image(c) for c in cells], axis=1))
-    return np.concatenate(rows, axis=0)
+    idx = np.linspace(0, len(image) - 1, n).round().astype(int)
+    return np.concatenate([np.concatenate(list(image[idx]), axis=1), np.concatenate(list(wrist[idx]), axis=1)], axis=0)
 
 
-def write_video(table, path: pathlib.Path, fps: float):
+def write_video(image: np.ndarray, wrist: np.ndarray, path: pathlib.Path, fps: float):
+    """Side-by-side (third-person | wrist) H.264 video at twice the recorded resolution."""
+    import av
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    writer = None
-    for a, b in zip(table.column("image").to_pylist(), table.column("wrist_image").to_pylist(), strict=True):
-        frame = np.concatenate([decode_image(a), decode_image(b)], axis=1)
-        frame = cv2.resize(frame, None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST)
-        if writer is None:
-            writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (frame.shape[1], frame.shape[0]))
-        writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-    if writer is not None:
-        writer.release()
+    with av.open(str(path), mode="w") as container:
+        stream = container.add_stream("libx264", rate=round(fps))
+        stream.width, stream.height, stream.pix_fmt = 2 * 2 * image.shape[2], 2 * image.shape[1], "yuv420p"
+        for a, b in zip(image, wrist, strict=True):
+            frame = cv2.resize(np.concatenate([a, b], axis=1), None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST)
+            for packet in stream.encode(av.VideoFrame.from_ndarray(np.ascontiguousarray(frame), format="rgb24")):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
 
 
 CSS = f"""
@@ -365,15 +378,24 @@ def main(
     )
     for name in task_names:
         eps = by_task[name]
-        table = pq.read_table(files[eps[0]], columns=["image", "wrist_image"])
-        strip = array_to_img_tag(frame_strip(table, frames_per_strip), f"Camera frames: {name}")
-        parts.append(
-            f'<div class="task"><h3>{html.escape(name)}</h3><small>episode {eps[0]}, {len(eps)} episodes in total</small><br>{strip}</div>'
-        )
-        for ep in rng.choice(eps, size=min(videos_per_task, len(eps)), replace=False):
-            video_table = table if ep == eps[0] else pq.read_table(files[int(ep)], columns=["image", "wrist_image"])
-            slug = "".join(c if c.isalnum() else "_" for c in name.lower())[:60].strip("_")
-            write_video(video_table, out / "videos" / f"{slug}__ep{int(ep):05d}.mp4", fps)
+        slug = "".join(c if c.isalnum() else "_" for c in name.lower())[:60].strip("_")
+        shown = False
+        picks = [
+            eps[0],
+            *[int(e) for e in rng.choice(eps[1:], size=min(videos_per_task - 1, len(eps) - 1), replace=False)],
+        ]
+        for ep in picks[: max(1, videos_per_task)]:
+            image = read_frames(root, info, files, ep, "image")
+            wrist = read_frames(root, info, files, ep, "wrist_image")
+            if not shown:
+                strip = array_to_img_tag(frame_strip(image, wrist, frames_per_strip), f"Camera frames: {name}")
+                parts.append(
+                    f'<div class="task"><h3>{html.escape(name)}</h3><small>episode {ep}, {len(eps)} episodes in '
+                    f"total</small><br>{strip}</div>"
+                )
+                shown = True
+            if videos_per_task > 0:
+                write_video(image, wrist, out / "videos" / f"{slug}__ep{ep:05d}.mp4", fps)
 
     (out / "report.html").write_text(
         f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, "
