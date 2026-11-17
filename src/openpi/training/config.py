@@ -647,6 +647,8 @@ def _ur5e_lwlibero_configs() -> list["TrainConfig"]:
         # Sized for a single 24 GB GPU. If this runs out of memory, use `--batch-size 8` or the
         # `_frozen_vision` variant below.
         "batch_size": 16,
+        # The dataset stores camera streams as video; decoding a sample takes about 80 ms on one core.
+        "num_workers": 8,
         "num_train_steps": 60_000,
         "lr_schedule": _optimizer.CosineDecaySchedule(
             warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=60_000, decay_lr=2.5e-6
