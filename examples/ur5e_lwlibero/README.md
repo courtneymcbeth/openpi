@@ -25,8 +25,9 @@ scratch file system if your home directory is small. Checkpoints go to
 `--overwrite` to continue a run. Training logs to Weights & Biases; add `--no-wandb-enabled` to turn that
 off.
 
-Normalization statistics for the dataset are checked in (`assets/ur5e_lwlibero/norm_stats.json`), so
-there is no separate `compute_norm_stats` step. To recompute them after changing the dataset:
+Normalization statistics for the dataset are checked in
+(`examples/ur5e_lwlibero/assets/ur5e_lwlibero/norm_stats.json`), so there is no separate
+`compute_norm_stats` step. To recompute them after changing the dataset:
 
 ```bash
 uv run scripts/compute_norm_stats.py --config-name pi05_ur5e_lwlibero_lora
@@ -78,6 +79,7 @@ LW-BenchHub:
 2. UR5e joint angles are solved along the path, with the UR5e's fingertips following the Piper's.
 3. The scene is rebuilt with the same objects in the same places, the UR5e executes the joint path, and
    the episode is kept only if the task's own success check passes and no other object was knocked away.
+   If it fails, the same demonstration is tried again with a slightly deeper or shallower grasp.
 
 So every episode in the dataset solved its task in simulation, and the actions are exactly the commands
 the simulator executed. The code is in the `ur5e` branch of the LW-BenchHub fork, under
