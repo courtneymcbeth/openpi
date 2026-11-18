@@ -126,7 +126,7 @@ def main(
     print(f"Wrote {num_episodes} episodes ({num_frames} frames) from {len(task_dirs)} tasks to {output_path}")
 
     if push_to_hub:
-        dataset.push_to_hub(tags=["libero", "ur5e", "lw-benchhub"], private=True, license="apache-2.0")
+        dataset.push_to_hub(tags=["libero", "ur5e", "lw-benchhub"], private=True, license=None)
 
 
 if __name__ == "__main__":

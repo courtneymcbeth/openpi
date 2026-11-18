@@ -7,7 +7,7 @@ The configs are sized for one 24 GB GPU.
 ## Train
 
 ```bash
-git clone -b ur5e-lwlibero <this fork> openpi && cd openpi
+git clone -b ur5e-lwlibero https://github.com/courtneymcbeth/openpi.git openpi && cd openpi
 GIT_LFS_SKIP_SMUDGE=1 uv sync
 GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
 
