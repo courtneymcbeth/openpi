@@ -53,7 +53,21 @@ prompt (the pi0.5 default, and the only way pi0.5 sees the state).
 
 ## Dataset
 
-`<repo_id>` in LeRobot v2.1 format, 20 Hz.
+`courtneymcbeth/ur5e_lwlibero` (private) in LeRobot v2.1 format, 20 Hz: 1,310 episodes, 549,000 frames
+(7.6 hours). The two cameras are stored as video (AV1, one file per episode and camera); everything
+else is in parquet files.
+
+| Suite | Episodes | Tasks with at least 20 episodes (of 10) |
+| --- | --- | --- |
+| libero_spatial | 483 | 10 |
+| libero_goal | 362 | 9 |
+| libero_object | 234 | 6 |
+| libero_10 | 231 | 6 |
+
+Coverage is uneven: 31 of the 40 tasks have 20 to 50 episodes, 5 have 4 to 19, and 4 have one or none
+(`LOPickUpTheKetchup...`, `LOPickUpTheSaladDressing...`, `L10L2PutBothTheCreamCheeseBoxAndTheButter...`,
+`L10L6PutWhiteMugOnPlate...`). The per-task counts are in the report that `visualize_dataset.py` writes,
+and the known causes are in the LW-BenchHub fork (`lw_benchhub/scripts/retarget/README.md`).
 
 | Key | Shape | Meaning |
 | --- | --- | --- |
@@ -67,6 +81,11 @@ prompt (the pi0.5 default, and the only way pi0.5 sees the state).
 These are the conventions of the `ur5e` embodiment in the pi0 and pi0.5 base models (see
 `docs/norm_stats.md`).
 
+Video frames are decoded with `torchcodec` if it can be imported and with `pyav` otherwise
+(`src/openpi/training/data_loader.py`); `torchcodec` needs FFmpeg libraries on the machine, `pyav`
+brings its own. To store PNG images instead (about 25 times larger), convert with
+`--image-storage image`.
+
 ### Where the data comes from
 
 LW-BenchHub has no UR5e and no single-arm demonstrations of its LIBERO tasks. The episodes here are
@@ -76,10 +95,13 @@ LW-BenchHub:
 
 1. For each demonstration, the path of the Piper gripper that does the work is extracted and re-timed.
    Demonstrations that use both arms one after the other are replayed in sequence by the single arm.
+   Demonstrations that need both arms at once (a hand-over in mid-air) cannot be replayed and are
+   missing from the dataset.
 2. UR5e joint angles are solved along the path, with the UR5e's fingertips following the Piper's.
 3. The scene is rebuilt with the same objects in the same places, the UR5e executes the joint path, and
    the episode is kept only if the task's own success check passes and no other object was knocked away.
-   If it fails, the same demonstration is tried again with a slightly deeper or shallower grasp.
+   If it fails, the same demonstration is tried again with a slightly different grasp (deeper,
+   shallower, or shifted sideways onto the object).
 
 So every episode in the dataset solved its task in simulation, and the actions are exactly the commands
 the simulator executed. The code is in the `ur5e` branch of the LW-BenchHub fork, under
