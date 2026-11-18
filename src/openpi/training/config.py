@@ -680,6 +680,15 @@ def _ur5e_lwlibero_configs() -> list["TrainConfig"]:
             freeze_filter=nnx.Any(lora_model.get_freeze_filter(), nnx_utils.PathRegex("PaliGemma/img/.*")),
             **lora_kwargs,
         ),
+        # Not for training: the pi0.5 base model as it is, for a zero-shot baseline in evaluation. Serve it
+        # with `--policy.dir` set to the pi05_base checkpoint. Uses the action horizon and the UR5e norm
+        # stats the base model was pretrained with.
+        TrainConfig(
+            name="pi05_ur5e_lwlibero_base",
+            model=pi0_config.Pi0Config(pi05=True, action_horizon=50),
+            data=data(AssetsConfig(assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets", asset_id="ur5e")),
+            weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        ),
         # Tiny dummy model on the real dataset: checks the data pipeline end to end without a large GPU.
         TrainConfig(
             name="pi05_ur5e_lwlibero_debug",

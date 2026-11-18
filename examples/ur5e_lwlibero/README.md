@@ -52,6 +52,7 @@ cp assets/pi05_ur5e_lwlibero_lora/<repo_id>/norm_stats.json examples/ur5e_lwlibe
 | `pi05_ur5e_lwlibero_lora_frozen_vision` | Same, with the image encoder frozen as well. Use if the first runs out of memory. |
 | `pi05_ur5e_lwlibero_lora_prestats` | Same as the first, but normalizes with the UR5e statistics of the pi0.5 base model instead of this dataset's. For comparison. |
 | `pi05_ur5e_lwlibero_debug` | Tiny dummy model on the real dataset. Checks the data pipeline in a minute, on any machine. |
+| `pi05_ur5e_lwlibero_base` | Not for training: the pi0.5 base model as it is, for a baseline in evaluation. |
 
 If training runs out of GPU memory, in this order: `--batch-size 8`, then
 `pi05_ur5e_lwlibero_lora_frozen_vision`. The memory use of pi0.5 LoRA on 24 GB has not been measured
@@ -131,10 +132,22 @@ uv run examples/ur5e_lwlibero/visualize_dataset.py --out-dir /path/to/viz
 `visualize_dataset.py` writes `report.html` (coverage per task, episode lengths, state and action
 distributions, example trajectories, camera frames for every task) and sample videos.
 
-## Not covered here
+## Evaluate
 
-Evaluating a trained checkpoint. LW-BenchHub has an openpi policy wrapper (`policy/PI/`), but it runs a
-whole action chunk at one action per simulator step and has no config for this robot. Evaluation needs
-the `UR5e-Joint` robot from the fork, the simulator stepping at 20 Hz (5 physics steps per action), and
-observations mapped as `base_rgb` / `wrist_rgb` / `joints` / `gripper` (see
-`src/openpi/policies/ur5e_policy.py`).
+A checkpoint is evaluated closed loop in LW-BenchHub, in the environment the data was recorded in. Serve
+it from this repo (inference needs 8.5 GB of GPU memory; the checkpoint's `params` and `assets`
+directories are enough):
+
+```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=false uv run scripts/serve_policy.py policy:checkpoint \
+    --policy.config=pi05_ur5e_lwlibero_lora --policy.dir=checkpoints/pi05_ur5e_lwlibero_lora/ur5e_run1/<step>
+```
+
+The simulator side (episode list, runner, report with a video of every episode) is in the `ur5e` branch
+of the LW-BenchHub fork; see "Evaluating a policy" in `lw_benchhub/scripts/retarget/README.md`. The
+server expects `base_rgb` and `wrist_rgb` (224x224 uint8), `joints` (6), `gripper` (1) and `prompt`, and
+returns absolute joint targets plus gripper commands (`src/openpi/policies/ur5e_policy.py`).
+
+`pi05_ur5e_lwlibero_base` is the pi0.5 base model without fine-tuning, for a zero-shot baseline: serve it
+with `--policy.dir` set to the downloaded `pi05_base` checkpoint
+(`$OPENPI_DATA_HOME/openpi-assets/checkpoints/pi05_base`).
