@@ -11,16 +11,26 @@ git clone -b ur5e-lwlibero https://github.com/courtneymcbeth/openpi.git openpi &
 GIT_LFS_SKIP_SMUDGE=1 uv sync
 GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
 
-# The dataset is a private Hugging Face dataset; log in once so it can be downloaded.
+# The dataset is a private Hugging Face dataset: log in once, then download and unpack it (2.9 GB).
 uv run huggingface-cli login
+export HF_LEROBOT_HOME=${HF_LEROBOT_HOME:-$HOME/.cache/huggingface/lerobot}
+mkdir -p $HF_LEROBOT_HOME/courtneymcbeth
+uv run huggingface-cli download courtneymcbeth/ur5e_lwlibero ur5e_lwlibero.tar --repo-type dataset \
+    --local-dir $HF_LEROBOT_HOME/courtneymcbeth
+tar -xf $HF_LEROBOT_HOME/courtneymcbeth/ur5e_lwlibero.tar -C $HF_LEROBOT_HOME/courtneymcbeth
+rm $HF_LEROBOT_HOME/courtneymcbeth/ur5e_lwlibero.tar
 
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_ur5e_lwlibero_lora \
     --exp-name=ur5e_run1 --overwrite
 ```
 
-The first run downloads the dataset (to `$HF_LEROBOT_HOME`, default `~/.cache/huggingface/lerobot`) and
-the pi0.5 base weights (about 12 GB, to `$OPENPI_DATA_HOME`, default `~/.cache/openpi`). Point both at a
-scratch file system if your home directory is small. Checkpoints go to
+The dataset goes to `$HF_LEROBOT_HOME` (default `~/.cache/huggingface/lerobot`); the first training run
+downloads the pi0.5 base weights (about 12 GB) to `$OPENPI_DATA_HOME` (default `~/.cache/openpi`). Set
+both to a scratch file system if your home directory is small, in every shell that runs training.
+
+Download the archive as shown: without a local copy the training code fetches the dataset file by file,
+and its 3,937 files exceed Hugging Face's limit of 1,000 API requests per five minutes (free accounts),
+so that download stops with "429 Too Many Requests". Checkpoints go to
 `checkpoints/pi05_ur5e_lwlibero_lora/<exp-name>/` every 1,000 steps. Use `--resume` instead of
 `--overwrite` to continue a run. Training logs to Weights & Biases; add `--no-wandb-enabled` to turn that
 off.
