@@ -363,7 +363,12 @@ class LeRobotUR5eDataConfig(DataConfigFactory):
 
     Expects a LeRobot dataset with the keys `image`, `wrist_image`, `joints` (6), `gripper` (1) and
     `actions` (7: absolute joint position targets followed by the gripper command).
+
+    With `arm_dof=7` it is the data config for a Franka Panda: `joints` (7) and `actions` (8).
     """
+
+    # Number of arm joints.
+    arm_dof: int = 6
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -386,13 +391,13 @@ class LeRobotUR5eDataConfig(DataConfigFactory):
 
         data_transforms = _transforms.Group(
             inputs=[ur5e_policy.UR5eInputs(model_type=model_config.model_type)],
-            outputs=[ur5e_policy.UR5eOutputs()],
+            outputs=[ur5e_policy.UR5eOutputs(action_dim=self.arm_dof + 1)],
         )
 
         # The dataset stores absolute joint position targets. The base models were trained on actions
-        # relative to the state at the start of each chunk, so convert the 6 joint dimensions to deltas
+        # relative to the state at the start of each chunk, so convert the joint dimensions to deltas
         # and leave the gripper dimension absolute.
-        delta_action_mask = _transforms.make_bool_mask(6, -1)
+        delta_action_mask = _transforms.make_bool_mask(self.arm_dof, -1)
         data_transforms = data_transforms.push(
             inputs=[_transforms.DeltaActions(delta_action_mask)],
             outputs=[_transforms.AbsoluteActions(delta_action_mask)],
@@ -619,13 +624,45 @@ _UR5E_LWLIBERO_ASSETS_DIR = str(pathlib.Path(__file__).resolve().parents[3] / "e
 _UR5E_LWLIBERO_ASSET_ID = "ur5e_lwlibero"
 
 
+# The same for the Franka Panda (see examples/panda_lwlibero/README.md).
+PANDA_LWLIBERO_REPO_ID = "courtneymcbeth/panda_lwlibero"
+_PANDA_LWLIBERO_ASSETS_DIR = str(pathlib.Path(__file__).resolve().parents[3] / "examples" / "panda_lwlibero" / "assets")
+_PANDA_LWLIBERO_ASSET_ID = "panda_lwlibero"
+
+
 def _ur5e_lwlibero_configs() -> list["TrainConfig"]:
+    return _lwlibero_configs(
+        "ur5e", UR5E_LWLIBERO_REPO_ID, 6, _UR5E_LWLIBERO_ASSETS_DIR, _UR5E_LWLIBERO_ASSET_ID, pretrained_asset_id="ur5e"
+    )
+
+
+def _panda_lwlibero_configs() -> list["TrainConfig"]:
+    # `franka` are the base model's statistics for a Franka FR3 with a Robotiq gripper: the same joint
+    # layout as the Panda, a different gripper.
+    return _lwlibero_configs(
+        "panda",
+        PANDA_LWLIBERO_REPO_ID,
+        7,
+        _PANDA_LWLIBERO_ASSETS_DIR,
+        _PANDA_LWLIBERO_ASSET_ID,
+        pretrained_asset_id="franka",
+    )
+
+
+def _lwlibero_configs(
+    robot: str, repo_id: str, arm_dof: int, assets_dir: str, asset_id: str, *, pretrained_asset_id: str
+) -> list["TrainConfig"]:
+    """The configs `pi05_<robot>_lwlibero_*` for one robot's LW-BenchHub LIBERO dataset."""
+    pretrained_stats = AssetsConfig(
+        assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets", asset_id=pretrained_asset_id
+    )
+
     def model(**kwargs) -> pi0_config.Pi0Config:
         return pi0_config.Pi0Config(
             pi05=True,
             # 20 actions at 20 Hz: each chunk covers one second.
             action_horizon=20,
-            # The prompts are short ("Task: ..., State: <7 numbers>;\nAction: "), so the default of 200 tokens
+            # The prompts are short ("Task: ..., State: <7 or 8 numbers>;\nAction: "), so the default of 200 tokens
             # only adds padding. `discrete_state_input` is left at the pi0.5 default (True): it is the only
             # way pi0.5 sees the joint state, which joint-space actions need.
             max_token_len=96,
@@ -634,12 +671,13 @@ def _ur5e_lwlibero_configs() -> list["TrainConfig"]:
 
     def data(assets: AssetsConfig) -> LeRobotUR5eDataConfig:
         return LeRobotUR5eDataConfig(
-            repo_id=UR5E_LWLIBERO_REPO_ID,
+            repo_id=repo_id,
             assets=assets,
             base_config=DataConfig(prompt_from_task=True),
+            arm_dof=arm_dof,
         )
 
-    own_stats = AssetsConfig(assets_dir=_UR5E_LWLIBERO_ASSETS_DIR, asset_id=_UR5E_LWLIBERO_ASSET_ID)
+    own_stats = AssetsConfig(assets_dir=assets_dir, asset_id=asset_id)
     lora_model = model(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora")
     lora_kwargs = {
         "model": lora_model,
@@ -660,38 +698,38 @@ def _ur5e_lwlibero_configs() -> list["TrainConfig"]:
     return [
         # Recommended: LoRA on both PaliGemma and the action expert, norm stats computed on our dataset.
         TrainConfig(
-            name="pi05_ur5e_lwlibero_lora",
+            name=f"pi05_{robot}_lwlibero_lora",
             data=data(own_stats),
             freeze_filter=lora_model.get_freeze_filter(),
             **lora_kwargs,
         ),
-        # Same, but reusing the UR5e norm stats the pi0.5 base model was pretrained with (for comparison).
+        # Same, but reusing the norm stats the pi0.5 base model was pretrained with (for comparison).
         TrainConfig(
-            name="pi05_ur5e_lwlibero_lora_prestats",
-            data=data(AssetsConfig(assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets", asset_id="ur5e")),
+            name=f"pi05_{robot}_lwlibero_lora_prestats",
+            data=data(pretrained_stats),
             freeze_filter=lora_model.get_freeze_filter(),
             **lora_kwargs,
         ),
         # Lower-memory fallback: additionally freezes the SigLIP image encoder, which the default LoRA
         # freeze filter leaves trainable.
         TrainConfig(
-            name="pi05_ur5e_lwlibero_lora_frozen_vision",
+            name=f"pi05_{robot}_lwlibero_lora_frozen_vision",
             data=data(own_stats),
             freeze_filter=nnx.Any(lora_model.get_freeze_filter(), nnx_utils.PathRegex("PaliGemma/img/.*")),
             **lora_kwargs,
         ),
         # Not for training: the pi0.5 base model as it is, for a zero-shot baseline in evaluation. Serve it
-        # with `--policy.dir` set to the pi05_base checkpoint. Uses the action horizon and the UR5e norm
+        # with `--policy.dir` set to the pi05_base checkpoint. Uses the action horizon and the norm
         # stats the base model was pretrained with.
         TrainConfig(
-            name="pi05_ur5e_lwlibero_base",
+            name=f"pi05_{robot}_lwlibero_base",
             model=pi0_config.Pi0Config(pi05=True, action_horizon=50),
-            data=data(AssetsConfig(assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets", asset_id="ur5e")),
+            data=data(pretrained_stats),
             weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         ),
         # Tiny dummy model on the real dataset: checks the data pipeline end to end without a large GPU.
         TrainConfig(
-            name="pi05_ur5e_lwlibero_debug",
+            name=f"pi05_{robot}_lwlibero_debug",
             model=model(paligemma_variant="dummy", action_expert_variant="dummy"),
             data=data(own_stats),
             batch_size=2,
@@ -1113,8 +1151,9 @@ _CONFIGS = [
         exp_name="debug_pi05",
         wandb_enabled=False,
     ),
-    # UR5e on the LW-BenchHub LIBERO tasks.
+    # UR5e and Franka Panda on the LW-BenchHub LIBERO tasks.
     *_ur5e_lwlibero_configs(),
+    *_panda_lwlibero_configs(),
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),

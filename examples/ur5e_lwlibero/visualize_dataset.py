@@ -1,6 +1,8 @@
-"""Builds a visual report of the UR5e LW-BenchHub LIBERO dataset (a LeRobot v2.1 dataset).
+"""Builds a visual report of a LW-BenchHub LIBERO dataset, UR5e or Franka Panda (a LeRobot v2.1 dataset).
 
     uv run examples/ur5e_lwlibero/visualize_dataset.py --out-dir /hdd/vla_data/viz
+    uv run examples/ur5e_lwlibero/visualize_dataset.py --out-dir /hdd/vla_data/viz_panda \
+        --repo-id courtneymcbeth/panda_lwlibero
 
 Writes to `--out-dir`:
 
@@ -34,9 +36,19 @@ import tyro
 from openpi.training.config import UR5E_LWLIBERO_REPO_ID
 
 # Chart colours (validated colour-blind-safe order) and neutral inks.
-SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"]
 SURFACE, INK, INK_2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e6e5e1"
-JOINT_NAMES = ["shoulder pan", "shoulder lift", "elbow", "wrist 1", "wrist 2", "wrist 3"]
+# Per `robot_type` of the dataset: display name, gripper, arm joint names, and the embodiment of the pi0.5
+# base model whose value ranges the charts are compared with.
+ROBOTS = {
+    "ur5e": (
+        "UR5e",
+        "Robotiq 2F-85 gripper",
+        ["shoulder pan", "shoulder lift", "elbow", "wrist 1", "wrist 2", "wrist 3"],
+        "ur5e",
+    ),
+    "panda": ("Franka Panda", "Franka Hand", [f"joint {i}" for i in range(1, 8)], "franka"),
+}
 ACTION_HORIZON = 20
 
 plt.rcParams.update(
@@ -110,7 +122,7 @@ def load_dataset(root: pathlib.Path):
 
 
 def training_actions(arrays: dict, horizon: int) -> np.ndarray:
-    """Actions as the model sees them: for every frame the next `horizon` actions, with the six joint
+    """Actions as the model sees them: for every frame the next `horizon` actions, with the joint
     targets expressed relative to the joint positions at that frame (the gripper stays absolute).
     Past the end of an episode the last action repeats, as in the data loader."""
     out = []
@@ -118,21 +130,21 @@ def training_actions(arrays: dict, horizon: int) -> np.ndarray:
         idx = np.flatnonzero(arrays["episode_index"] == ep)
         act, state = arrays["actions"][idx], arrays["joints"][idx]
         steps = np.minimum(np.arange(len(idx))[:, None] + np.arange(horizon)[None, :], len(idx) - 1)
-        chunk = act[steps].copy()  # (T, horizon, 7)
-        chunk[..., :6] -= state[:, None, :]
-        out.append(chunk.reshape(-1, 7))
+        chunk = act[steps].copy()  # (T, horizon, joints + 1)
+        chunk[..., :-1] -= state[:, None, :]
+        out.append(chunk.reshape(-1, act.shape[-1]))
     return np.concatenate(out)
 
 
-def pretrained_ur5e_stats() -> dict | None:
-    """Norm stats of the `ur5e` embodiment in the pi0.5 base checkpoint, if they can be downloaded."""
+def pretrained_stats(asset_id: str) -> dict | None:
+    """Norm stats of an embodiment (`ur5e`, `franka`) in the pi0.5 base checkpoint, if they can be downloaded."""
     try:
         import openpi.shared.download as download
         import openpi.shared.normalize as normalize
 
-        return normalize.load(download.maybe_download("gs://openpi-assets/checkpoints/pi05_base/assets/ur5e"))
+        return normalize.load(download.maybe_download(f"gs://openpi-assets/checkpoints/pi05_base/assets/{asset_id}"))
     except Exception as e:
-        print(f"Could not load the pretrained ur5e norm stats ({e}); skipping that comparison.")
+        print(f"Could not load the pretrained {asset_id} norm stats ({e}); skipping that comparison.")
         return None
 
 
@@ -178,11 +190,20 @@ def chart_lengths(seconds: np.ndarray):
     return fig
 
 
-def chart_distributions(values: np.ndarray, title: str, unit: str, pretrained: dict | None = None):
+def chart_distributions(
+    values: np.ndarray,
+    joint_names: list[str],
+    title: str,
+    unit: str,
+    pretrained: dict | None = None,
+    pretrained_name: str = "",
+):
     """Small multiples: one histogram per dimension with the 1st and 99th percentile marked."""
-    names = [*JOINT_NAMES, "gripper"]
-    fig, axes = plt.subplots(2, 4, figsize=(11.5, 4.6))
-    for d, ax in enumerate(axes.flat[:7]):
+    names = [*joint_names, "gripper"]
+    # One panel per dimension and one for the legend: 2 x 4 for the UR5e, 3 x 3 for the Panda.
+    rows, cols = (2, 4) if len(names) < 8 else (3, 3)
+    fig, axes = plt.subplots(rows, cols, figsize=(11.5, 2.3 * rows))
+    for d, ax in enumerate(axes.flat[: len(names)]):
         v = values[:, d]
         q01, q99 = np.percentile(v, [1, 99])
         lo, hi = np.percentile(v, [0.1, 99.9])
@@ -196,13 +217,20 @@ def chart_distributions(values: np.ndarray, title: str, unit: str, pretrained: d
         ax.set_title(names[d], fontweight="normal", fontsize=9)
         ax.set_yticks([])
         ax.grid(visible=False)
-        ax.set_xlabel("closure (0 open, 1 closed)" if d == 6 else unit)
-    ax = axes.flat[7]
-    ax.axis("off")
+        ax.set_xlabel("closure (0 open, 1 closed)" if d == len(names) - 1 else unit)
+    for ax in axes.flat[len(names) :]:
+        ax.axis("off")
+    ax = axes.flat[len(names)]
     handles = [plt.Line2D([], [], color=SERIES[0], linewidth=1.2, label="this dataset: 1st and 99th percentile")]
     if pretrained is not None:
         handles.append(
-            plt.Line2D([], [], color=SERIES[1], linewidth=1.2, label="pi0.5 base UR5e data: 1st and 99th percentile")
+            plt.Line2D(
+                [],
+                [],
+                color=SERIES[1],
+                linewidth=1.2,
+                label=f"pi0.5 base {pretrained_name} data: 1st and 99th percentile",
+            )
         )
     ax.legend(handles=handles, loc="center left", handlelength=1.4)
     fig.suptitle(title, x=0.01, ha="left", fontsize=11, fontweight="bold", color=INK)
@@ -210,16 +238,18 @@ def chart_distributions(values: np.ndarray, title: str, unit: str, pretrained: d
     return fig
 
 
-def chart_episode_trace(joints: np.ndarray, gripper: np.ndarray, actions: np.ndarray, fps: float, title: str):
+def chart_episode_trace(
+    joints: np.ndarray, gripper: np.ndarray, actions: np.ndarray, joint_names: list[str], fps: float, title: str
+):
     t = np.arange(len(joints)) / fps
     fig, (a1, a2) = plt.subplots(2, 1, figsize=(9.5, 4.2), height_ratios=[3, 1], sharex=True)
-    for d in range(6):
+    for d, name in enumerate(joint_names):
         a1.plot(t, actions[:, d], color=SERIES[d], linewidth=1.0, alpha=0.45)
-        a1.plot(t, joints[:, d], color=SERIES[d], linewidth=1.8, label=JOINT_NAMES[d])
+        a1.plot(t, joints[:, d], color=SERIES[d], linewidth=1.8, label=name)
     a1.set_ylabel("joint angle (rad)")
-    a1.legend(ncols=6, loc="lower left", bbox_to_anchor=(0, 1.0), handlelength=1.2, columnspacing=1.2)
+    a1.legend(ncols=len(joint_names), loc="lower left", bbox_to_anchor=(0, 1.0), handlelength=1.2, columnspacing=1.2)
     a1.set_title(title, pad=26)
-    a2.plot(t, actions[:, 6], color=INK_2, linewidth=1.0, alpha=0.6, label="command")
+    a2.plot(t, actions[:, -1], color=INK_2, linewidth=1.0, alpha=0.6, label="command")
     a2.plot(t, gripper, color=SERIES[0], linewidth=1.8, label="measured")
     a2.set_ylabel("gripper closure")
     a2.set_xlabel("time (s)")
@@ -300,7 +330,8 @@ def main(
         source_demos_per_task: Number of source demonstrations per task (reference line in the first chart).
         videos_per_task: Episodes per task to export as videos (0 to skip).
         frames_per_strip: Camera frames shown per task in the report.
-        compare_pretrained: Mark the value ranges of the pi0.5 base model's UR5e data in the charts.
+        compare_pretrained: Mark the value ranges of the pi0.5 base model's data for this kind of robot (its
+            `ur5e` embodiment for the UR5e, `franka` for the Panda) in the charts.
     """
     root = HF_LEROBOT_HOME / repo_id
     out = pathlib.Path(out_dir)
@@ -308,6 +339,7 @@ def main(
     info, tasks, episodes, arrays, files = load_dataset(root)
     fps = float(info["fps"])
     rng = np.random.default_rng(0)
+    robot, gripper_name, joint_names, pretrained_id = ROBOTS[info["robot_type"]]
 
     ep_task = {e["episode_index"]: e["tasks"][0] for e in episodes}
     ep_len = {e["episode_index"]: e["length"] for e in episodes}
@@ -318,12 +350,12 @@ def main(
 
     state = np.concatenate([arrays["joints"], arrays["gripper"][:, None]], axis=1)
     deltas = training_actions(arrays, ACTION_HORIZON)
-    pretrained = pretrained_ur5e_stats() if compare_pretrained else None
+    pretrained = pretrained_stats(pretrained_id) if compare_pretrained else None
 
     parts = [
-        f"<h1>UR5e demonstrations on LW-BenchHub LIBERO tasks</h1><p>Dataset <code>{html.escape(repo_id)}</code>, "
-        f"recorded at {fps:g} Hz. Every episode is a Double-Piper demonstration replayed by a UR5e with a Robotiq "
-        f"2F-85 gripper in simulation and kept only if the task was solved.</p>",
+        f"<h1>{robot} demonstrations on LW-BenchHub LIBERO tasks</h1><p>Dataset <code>{html.escape(repo_id)}</code>, "
+        f"recorded at {fps:g} Hz. Every episode is a Double-Piper demonstration replayed by a {robot} with a "
+        f"{gripper_name} in simulation and kept only if the task was solved.</p>",
         '<div class="tiles">'
         + "".join(
             f'<div class="tile"><b>{v}</b><span>{k}</span></div>'
@@ -336,8 +368,8 @@ def main(
             ]
         )
         + "</div>",
-        "<h2>Coverage</h2><p>Successful UR5e episodes per task. Each task has "
-        f"{source_demos_per_task} source demonstrations; the shortfall is demonstrations the UR5e could not "
+        f"<h2>Coverage</h2><p>Successful {robot} episodes per task. Each task has "
+        f"{source_demos_per_task} source demonstrations; the shortfall is demonstrations the {robot} could not "
         "reproduce.</p>",
         fig_to_img_tag(chart_episodes_per_task(task_names, counts, source_demos_per_task), "Episodes per task"),
         "<details><summary>Table: episodes per task</summary><table><tr><th>task</th><th>episodes</th>"
@@ -352,14 +384,22 @@ def main(
         "<h2>Robot state</h2><p>Measured arm joint angles and gripper closure over all frames. These are the "
         "model's proprioceptive input.</p>",
         fig_to_img_tag(
-            chart_distributions(state, "State", "rad", pretrained and pretrained.get("state")), "State distributions"
+            chart_distributions(
+                state, joint_names, "State", "rad", pretrained and pretrained.get("state"), pretrained_id
+            ),
+            "State distributions",
         ),
         f"<h2>Actions as trained</h2><p>The model predicts {ACTION_HORIZON} actions ({ACTION_HORIZON / fps:g} s) at a "
         "time. Joint targets are expressed relative to the joint angles at the start of the chunk; the gripper "
         "command stays absolute. The histograms cover every action of every chunk.</p>",
         fig_to_img_tag(
             chart_distributions(
-                deltas, "Actions (relative joint targets)", "rad", pretrained and pretrained.get("actions")
+                deltas,
+                joint_names,
+                "Actions (relative joint targets)",
+                "rad",
+                pretrained and pretrained.get("actions"),
+                pretrained_id,
             ),
             "Action distributions",
         ),
@@ -369,7 +409,9 @@ def main(
     for ep in rng.choice(sorted(ep_len), size=min(3, len(ep_len)), replace=False):
         idx = np.flatnonzero(arrays["episode_index"] == ep)
         title = f"Episode {ep}: {ep_task[int(ep)]}"
-        fig = chart_episode_trace(arrays["joints"][idx], arrays["gripper"][idx], arrays["actions"][idx], fps, title)
+        fig = chart_episode_trace(
+            arrays["joints"][idx], arrays["gripper"][idx], arrays["actions"][idx], joint_names, fps, title
+        )
         parts.append(fig_to_img_tag(fig, title))
 
     parts.append(
@@ -399,7 +441,7 @@ def main(
 
     (out / "report.html").write_text(
         f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, "
-        f"initial-scale=1'><title>UR5e LIBERO dataset</title><style>{CSS}</style></head><body><main>"
+        f"initial-scale=1'><title>{robot} LIBERO dataset</title><style>{CSS}</style></head><body><main>"
         + "\n".join(parts)
         + "</main></body></html>"
     )

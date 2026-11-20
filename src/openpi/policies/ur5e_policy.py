@@ -1,7 +1,9 @@
-"""Policy transforms for a single-arm UR5e with a Robotiq 2F-85 gripper.
+"""Policy transforms for a single arm with a parallel gripper and joint-position actions: the UR5e with a
+Robotiq 2F-85 gripper and, with `action_dim=8`, the 7-joint Franka Panda with the Franka Hand.
 
-Conventions (these match the `ur5e` embodiment the pi0 / pi0.5 base models were pretrained on, see
-docs/norm_stats.md):
+Conventions for the UR5e (these match the `ur5e` embodiment the pi0 / pi0.5 base models were pretrained on,
+see docs/norm_stats.md); the Panda is the same with seven arm joints (`panda_joint1` ... `panda_joint7`),
+which is the layout the base models use for 7-DoF arms:
 
 - state:   6 arm joint positions in radians (shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3)
            followed by the gripper closure in [0, 1], where 0 is fully open and 1 is fully closed.
@@ -88,8 +90,11 @@ class UR5eInputs(transforms.DataTransformFn):
 
 @dataclasses.dataclass(frozen=True)
 class UR5eOutputs(transforms.DataTransformFn):
-    """Converts model outputs back to the UR5e action format. Used for inference only."""
+    """Converts model outputs back to the robot's action format. Used for inference only."""
+
+    # Number of action dimensions of the robot: arm joints + 1 gripper.
+    action_dim: int = UR5E_ACTION_DIM
 
     def __call__(self, data: dict) -> dict:
-        # The model predicts padded actions; only the first 7 dimensions are meaningful.
-        return {"actions": np.asarray(data["actions"][..., :UR5E_ACTION_DIM])}
+        # The model predicts padded actions; only the first `action_dim` dimensions are meaningful.
+        return {"actions": np.asarray(data["actions"][..., : self.action_dim])}
